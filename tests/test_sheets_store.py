@@ -23,11 +23,14 @@ from gold_radar.alert_logic import AlertState
 from gold_radar.sheets_store import (
     HISTORY_COLUMNS,
     STATE_HEADERS,
+    HealthState,
     SheetsHandle,
     append_history,
     ensure_sheets,
     open_store,
+    read_health_state,
     read_state,
+    write_health_state,
     write_state,
 )
 
@@ -229,3 +232,80 @@ def test_failure_never_leaks_secrets(mock_auth, mock_creds, mock_sleep):
     with pytest.raises(RuntimeError) as exc_info:
         append_history(handle, {"time": "2026-11-18"})
     assert FAKE_SHEET_ID not in str(exc_info.value)
+
+
+def test_read_health_state_empty_defaults():
+    """قراءة ورقة حالة فارغة تعيد القيم الافتراضية للحالة الصحية (0, None, None)."""
+    handle = _create_mock_handle()
+    ws_mock = MagicMock()
+    handle.spreadsheet.worksheet.return_value = ws_mock
+
+    # 1. فارغة تماماً
+    ws_mock.get_all_values.return_value = []
+    h1 = read_health_state(handle)
+    assert h1.consecutive_failures == 0
+    assert h1.last_failure_alert_at is None
+    assert h1.last_heartbeat_date is None
+
+    # 2. تحتوي فقط على ترويسات ومفاتيح بدون قيم
+    ws_mock.get_all_values.return_value = [
+        STATE_HEADERS,
+        ["consecutive_failures", ""],
+        ["last_failure_alert_at", ""],
+        ["last_heartbeat_date", ""],
+    ]
+    h2 = read_health_state(handle)
+    assert h2.consecutive_failures == 0
+    assert h2.last_failure_alert_at is None
+    assert h2.last_heartbeat_date is None
+
+
+def test_write_and_read_health_state_round_trip():
+    """التحقق من صحة كتابة الحالة الصحية ثم قراءتها واسترجاع نفس القيم."""
+    handle = _create_mock_handle()
+    ws_mock = MagicMock()
+    handle.spreadsheet.worksheet.return_value = ws_mock
+
+    original_health = HealthState(
+        consecutive_failures=3,
+        last_failure_alert_at="2026-11-19T10:00:00+00:00",
+        last_heartbeat_date="2026-11-19",
+    )
+
+    write_health_state(handle, original_health)
+    ws_mock.update.assert_called_once()
+    args, kwargs = ws_mock.update.call_args
+    written_rows = args[0]
+    range_target = args[1] if len(args) > 1 else kwargs.get("range_name", "")
+    assert range_target == "A7:B9"
+
+    # محاكاة إعادة القراءة
+    rows_in_sheet = [
+        STATE_HEADERS,
+        ["last_alert_price", "6550.0"],
+        ["last_seen_price", "6550.0"],
+        ["suspicious_count", "0"],
+        ["last_suspicious_price", ""],
+        ["updated_at", "2026-11-19T09:00:00+00:00"],
+    ] + written_rows
+    ws_mock.get_all_values.return_value = rows_in_sheet
+
+    recovered = read_health_state(handle)
+    assert recovered.consecutive_failures == 3
+    assert recovered.last_failure_alert_at == "2026-11-19T10:00:00+00:00"
+    assert recovered.last_heartbeat_date == "2026-11-19"
+
+
+def test_health_state_failure_never_leaks_secrets():
+    """في حال فشل قراءة أو كتابة الحالة الصحية، لا يتم تسريب أي أسرار."""
+    handle = _create_mock_handle()
+    handle.spreadsheet.worksheet.side_effect = Exception(f"Health sheet error with {FAKE_SHEET_ID}")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        read_health_state(handle)
+    assert FAKE_SHEET_ID not in str(exc_info.value)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        write_health_state(handle, HealthState())
+    assert FAKE_SHEET_ID not in str(exc_info.value)
+

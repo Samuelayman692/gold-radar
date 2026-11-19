@@ -74,7 +74,18 @@ STATE_KEYS = [
     "suspicious_count",
     "last_suspicious_price",
     "updated_at",
+    "consecutive_failures",
+    "last_failure_alert_at",
+    "last_heartbeat_date",
 ]
+
+
+@dataclass
+class HealthState:
+    """كائن حالة صحة المنظومة وتتبع الأعطال ونبض الحياة."""
+    consecutive_failures: int = 0
+    last_failure_alert_at: str | None = None
+    last_heartbeat_date: str | None = None
 
 
 @dataclass
@@ -310,3 +321,81 @@ def append_history(handle: SheetsHandle, row: dict[str, Any]) -> None:
                 time.sleep(1.0 * attempt)
                 continue
             raise RuntimeError(f"فشل إضافة صف في ورقة التاريخ: {_clean_error(str(exc), secrets)}") from None
+
+
+def read_health_state(handle: SheetsHandle) -> HealthState:
+    """
+    قراءة الحالة الصحية للنظام من ورقة 'الحالة'.
+    الخلايا الفارغة أو المفقودة تعني القيم الافتراضية (0, None, None).
+    """
+    sh = handle.spreadsheet
+    secrets = [handle.sheet_id]
+
+    try:
+        ws = sh.worksheet(STATE_SHEET_NAME)
+    except Exception as exc:
+        raise RuntimeError(f"ورقة الحالة '{STATE_SHEET_NAME}' غير موجودة: {_clean_error(str(exc), secrets)}") from None
+
+    try:
+        rows = ws.get_all_values()
+    except Exception as exc:
+        raise RuntimeError(f"فشل قراءة بيانات ورقة الحالة: {_clean_error(str(exc), secrets)}") from None
+
+    if not rows:
+        return HealthState(consecutive_failures=0, last_failure_alert_at=None, last_heartbeat_date=None)
+
+    data_map: dict[str, str] = {}
+    for r in rows:
+        if len(r) >= 1 and r[0].strip() and r[0].strip() != "المفتاح":
+            val = r[1].strip() if len(r) > 1 else ""
+            data_map[r[0].strip()] = val
+
+    raw_cf = data_map.get("consecutive_failures", "")
+    try:
+        cf = int(float(raw_cf)) if raw_cf and raw_cf.lower() != "none" else 0
+    except (ValueError, TypeError):
+        cf = 0
+
+    last_fail = data_map.get("last_failure_alert_at", "").strip()
+    if not last_fail or last_fail.lower() == "none":
+        last_fail = None
+
+    last_hb = data_map.get("last_heartbeat_date", "").strip()
+    if not last_hb or last_hb.lower() == "none":
+        last_hb = None
+
+    return HealthState(
+        consecutive_failures=cf,
+        last_failure_alert_at=last_fail,
+        last_heartbeat_date=last_hb,
+    )
+
+
+def write_health_state(handle: SheetsHandle, health: HealthState) -> None:
+    """
+    كتابة وتحديث الحالة الصحية للنظام في ورقة 'الحالة'.
+    """
+    sh = handle.spreadsheet
+    secrets = [handle.sheet_id]
+
+    try:
+        ws = sh.worksheet(STATE_SHEET_NAME)
+    except Exception as exc:
+        raise RuntimeError(f"تعذر العثور على ورقة الحالة للكتابة: {_clean_error(str(exc), secrets)}") from None
+
+    health_rows = [
+        ["consecutive_failures", str(health.consecutive_failures)],
+        ["last_failure_alert_at", health.last_failure_alert_at or ""],
+        ["last_heartbeat_date", health.last_heartbeat_date or ""],
+    ]
+
+    for attempt in range(1, SHEETS_MAX_RETRIES + 1):
+        try:
+            ws.update(health_rows, "A7:B9")
+            return
+        except Exception as exc:
+            if attempt < SHEETS_MAX_RETRIES:
+                time.sleep(1.0 * attempt)
+                continue
+            raise RuntimeError(f"فشل كتابة الحالة الصحية في جدول جوجل: {_clean_error(str(exc), secrets)}") from None
+
