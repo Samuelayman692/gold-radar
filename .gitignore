@@ -1,0 +1,28 @@
+# Environment and secrets
+.env
+*.env
+*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+ENV/
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+
+# IDE & OS
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
+*.log
+
+!tests/fixtures/*.json
+
+!tests/fixtures/*.json
